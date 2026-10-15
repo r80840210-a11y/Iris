@@ -5,6 +5,7 @@ import re
 import random
 import ast
 import operator
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 
 import aiosqlite
@@ -158,15 +159,46 @@ async def log_action(chat_id, uid, mid, action, reason=""):
         await db.commit()
 
 async def resolve_target(message):
+    """Resolve a target from a reply, numeric Telegram ID, or a previously seen @username."""
     if message.reply_to_message and message.reply_to_message.from_user:
         return message.reply_to_message.from_user
     args = (message.text or "").split()
-    if len(args) > 1 and args[1].isdigit():
-        class U: pass
-        u = U()
-        u.id = int(args[1]); u.full_name = f"ID {u.id}"; u.username = None; u.is_bot = False
-        return u
+    if len(args) < 2:
+        return None
+    token = args[1].strip().rstrip(",")
+    if token.startswith("@"):
+        username = token[1:].casefold()
+        async with aiosqlite.connect(DB_PATH) as db:
+            cur = await db.execute(
+                "SELECT user_id, username, full_name FROM users WHERE lower(username)=? LIMIT 1",
+                (username,),
+            )
+            row = await cur.fetchone()
+        if not row:
+            return None
+        return SimpleNamespace(id=row[0], username=row[1], full_name=row[2] or row[1], is_bot=False)
+    if token.isdigit():
+        uid = int(token)
+        try:
+            member = await message.bot.get_chat_member(message.chat.id, uid)
+            return member.user
+        except TelegramAPIError:
+            # ID may still be known to the bot even if Telegram won't return membership.
+            async with aiosqlite.connect(DB_PATH) as db:
+                cur = await db.execute("SELECT user_id, username, full_name FROM users WHERE user_id=?", (uid,))
+                row = await cur.fetchone()
+            if row:
+                return SimpleNamespace(id=row[0], username=row[1], full_name=row[2] or f"ID {uid}", is_bot=False)
     return None
+
+def command_tail(message, target=None):
+    """Arguments after command and optional explicit target, for reason/duration parsing."""
+    parts = (message.text or "").split(maxsplit=2)
+    if len(parts) < 2:
+        return ""
+    if target is not None and not (message.reply_to_message and message.reply_to_message.from_user):
+        return parts[2] if len(parts) > 2 else ""
+    return (message.text or "").partition(" ")[2].strip()
 
 def start_menu(bot_username=""):
     kb = InlineKeyboardBuilder()
@@ -220,7 +252,7 @@ async def show_commands(c: CallbackQuery):
 COMMAND_SECTIONS = {
     "main": ("📌 Основные", "<b>Основные команды</b>\n/start — запуск бота\n/help или /команды — меню команд\n/id — ID пользователя и чата\n/profile — профиль\n/balance — баланс\n/bio ТЕКСТ — описание профиля\n/daily — ежедневный бонус\n/pay СУММА (ответом) — перевести монеты"),
     "moderation": ("🛡 Модерация", "<b>Модерация</b> (в большинстве случаев ответом на сообщение)\n/warn [причина] — предупреждение\n/warnings — активные предупреждения\n/unwarn — снять последнее предупреждение\n/mute 30m причина — мут на 30 минут\n/mute 1h причина — мут на 1 час\n/mute 2d причина — мут на 2 дня\n/unmute — снять мут\n/ban [срок] [причина] — бан навсегда или на срок\nПример: /ban 1d спам\n/unban USER_ID — разбанить по ID\n/softban [причина] — удалить и сразу снять бан\n/kick — исключить без постоянного бана\n/purge ЧИСЛО (ответом) — удалить сообщения\n/modlog — журнал действий\n/setrules ТЕКСТ — установить правила\n/warnlimit ЧИСЛО — лимит предупреждений"),
-    "fun": ("🎭 Развлечения", "<b>Развлечения</b> (ответом на сообщение)\n/обнять — обнять\n/пнуть — шуточный мультяшный пинок\n/датьпять — дать пять\n/погладить — дружеское действие\n/поддержать — поддержать\n/пожатьруку — рукопожатие\n/танцевать — танец\n/флирт — лёгкий подкат\n/шип — совместимость\n/выбери ВАРИАНТ1 | ВАРИАНТ2 — выбор\n/рандом — случайное число\n/кубик — кубик\n/анекдот — шутка\n/комплимент — комплимент"),
+    "fun": ("🎭 Развлечения", "<b>Развлечения</b> (ответом на сообщение или через @username)\n/обнять — обнять\n/пнуть — шуточный мультяшный пинок\n/датьпять — дать пять\n/погладить — дружеское действие\n/поддержать — поддержать\n/пожатьруку — рукопожатие\n/танцевать — танец\n/флирт — лёгкий подкат\n/шип — совместимость\n/выбери ВАРИАНТ1 | ВАРИАНТ2 — выбор\n/рандом — случайное число\n/кубик — кубик\n/анекдот — шутка\n/комплимент — комплимент"),
     "social": ("💞 Отношения", "<b>Отношения и сообщество</b>\n/брак (ответом) — предложить брак\n/брак_да — принять предложение\n/брак_нет — отклонить\n/мой_брак — посмотреть свой статус\n/развод — развестись\n/браки — список браков\n/rep — репутация (ответом)\n/реп_плюс — повысить репутацию\n/реп_минус — понизить репутацию\n/клансоздать НАЗВАНИЕ — создать клан\n/кланы — список кланов\n/кланвступить ID — вступить\n/кланвыйти — выйти\n/мойклан — мой клан"),
     "tools": ("🧰 Инструменты", "<b>Инструменты чата</b>\n/rules — правила чата\n/setwelcome ТЕКСТ — задать приветствие\n/welcomeon и /welcomeoff — приветствие вкл./выкл.\n/note НАЗВАНИЕ | ТЕКСТ — сохранить заметку (админ)\n/заметки — список заметок\n/заметкапоказать НАЗВАНИЕ — показать заметку\n/заметкаудалить НАЗВАНИЕ — удалить заметку (админ)\n/stats — статистика чата\n/top — топ активности\n/bookmark (ответом) — сохранить сообщение\n/bookmarks — мои закладки\n/bookmarkdel НОМЕР — удалить закладку\n/timer СЕКУНДЫ ТЕКСТ — напоминание")
 }
@@ -392,7 +424,7 @@ async def warn(m):
     t=await resolve_target(m)
     if not t: return await m.answer("Ответь на сообщение пользователя: /warn причина")
     if t.id==m.from_user.id or t.id==m.bot.id: return await m.answer("Нельзя выдать предупреждение этому пользователю.")
-    reason=(m.text or "").partition(" ")[2].strip() or "не указана"
+    reason=command_tail(m, t) or "не указана"
     await ensure_user(t)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("INSERT INTO warnings(chat_id,user_id,moderator_id,reason,created_at) VALUES(?,?,?,?,?)",(m.chat.id,t.id,m.from_user.id,reason,now()))
@@ -475,7 +507,7 @@ async def mute(m):
     t = await resolve_target(m)
     if not t:
         return await m.answer("Ответь на сообщение пользователя: /mute 30m причина\nПримеры: /mute 30m спам, /mute 1h флуд, /mute 2d оскорбления")
-    raw = (m.text or "").partition(" ")[2].strip()
+    raw = command_tail(m, t)
     parsed, reason = split_duration_reason(raw)
     seconds = min(parsed, 366 * 86400) if parsed is not None else 3600
     if parsed is None and raw:
@@ -510,7 +542,7 @@ async def ban(m):
     t = await resolve_target(m)
     if not t:
         return await m.answer("Ответь на сообщение пользователя:\n/ban причина — навсегда\n/ban 1d причина — на день\n/ban 1h причина — на час")
-    raw = (m.text or "").partition(" ")[2].strip()
+    raw = command_tail(m, t)
     parsed, reason = split_duration_reason(raw)
     duration = min(parsed, 366 * 86400) if parsed is not None else None
     if parsed is None and raw:
@@ -533,7 +565,7 @@ async def softban(m):
     t = await resolve_target(m)
     if not t:
         return await m.answer("Ответь на сообщение: /softban причина")
-    reason = (m.text or "").partition(" ")[2].strip() or "не указана"
+    reason = command_tail(m, t) or "не указана"
     try:
         await m.bot.ban_chat_member(m.chat.id, t.id)
         await m.bot.unban_chat_member(m.chat.id, t.id, only_if_banned=True)
@@ -650,13 +682,14 @@ async def get_active_marriage(chat_id, uid):
             (chat_id,uid,uid))
         return await cur.fetchone()
 
-@dp.message(Command("marry", "брак"))
+@dp.message(Command("marry", "брак", "жениться"))
 async def marry(m):
     if m.chat.type == "private":
         return await m.answer("Предложение брака можно отправить в группе, ответив на сообщение.")
-    if not m.reply_to_message or not m.reply_to_message.from_user:
-        return await m.answer("Ответь на сообщение пользователя командой /marry")
-    a,b=m.from_user,m.reply_to_message.from_user
+    b = await resolve_target(m)
+    if not b:
+        return await m.answer("Укажи пользователя: /брак @username (или ответь на его сообщение). Если бот ещё не видел его в чате, сначала пусть напишет любое сообщение.")
+    a=m.from_user
     if a.id==b.id or b.is_bot:
         return await m.answer("Выбери другого участника группы.")
     if await get_active_marriage(m.chat.id,a.id) or await get_active_marriage(m.chat.id,b.id):
@@ -669,7 +702,7 @@ async def marry(m):
         await db.commit()
     await m.answer(f"💍 {mention(a)} предлагает брак {mention(b)}!\nПолучатель может ответить командой /брак_да или /брак_нет.",parse_mode="HTML")
 
-@dp.message(Command("marry_yes"))
+@dp.message(Command("marry_yes", "брак_да"))
 async def marry_yes(m):
     async with aiosqlite.connect(DB_PATH) as db:
         cur=await db.execute("SELECT id,user1,user2 FROM marriages WHERE chat_id=? AND user2=? AND status='pending' ORDER BY id DESC LIMIT 1",(m.chat.id,m.from_user.id))
@@ -683,7 +716,7 @@ async def marry_yes(m):
         await db.commit()
     await m.answer("💍 Поздравляем! Брак заключён. Используй /мой_брак для просмотра.")
 
-@dp.message(Command("marry_no"))
+@dp.message(Command("marry_no", "брак_нет"))
 async def marry_no(m):
     async with aiosqlite.connect(DB_PATH) as db:
         cur=await db.execute("SELECT id,user1 FROM marriages WHERE chat_id=? AND user2=? AND status='pending' ORDER BY id DESC LIMIT 1",(m.chat.id,m.from_user.id))
@@ -737,7 +770,7 @@ async def joke(m):
 
 @dp.message(Command("комплимент"))
 async def compliment(m):
-    target=m.reply_to_message.from_user if m.reply_to_message and m.reply_to_message.from_user else m.from_user
+    target=await resolve_target(m) or m.from_user
     await m.answer(f"🌟 {mention(target)}, {random.choice(COMPLIMENTS)}",parse_mode="HTML")
 
 @dp.message(Command("выбери"))
@@ -764,13 +797,14 @@ async def roll(m):
 
 @dp.message(Command("шип"))
 async def ship(m):
-    if m.reply_to_message and m.reply_to_message.from_user:
-        a,b=m.from_user,m.reply_to_message.from_user
+    b = await resolve_target(m)
+    if b:
+        a=m.from_user
         if a.id==b.id: return await m.answer("Можно пошипперить двух разных людей 🙂")
         pct=random.randint(0,100)
         await m.answer(f"💞 Совместимость {mention(a)} и {mention(b)}: {pct}% — это просто случайная игра!",parse_mode="HTML")
     else:
-        await m.answer("Ответь на сообщение пользователя командой /шип.")
+        await m.answer("Укажи пользователя: /шип @username (или ответь на его сообщение).")
 
 
 # Короткие мемные RP-команды. Все ответы шуточные и без подробного насилия.
@@ -782,9 +816,9 @@ RP_ACTIONS = {
 }
 
 async def rp_action(m, action_key):
-    target = m.reply_to_message.from_user if m.reply_to_message and m.reply_to_message.from_user else None
+    target = await resolve_target(m)
     if not target:
-        return await m.answer("Ответь на сообщение человека этой командой 🙂")
+        return await m.answer("Укажи пользователя: /обнять @username (или ответь на его сообщение). Бот должен хотя бы раз видеть этого пользователя в чате.")
     if target.id == m.from_user.id:
         return await m.answer("Самому себе так не получится 😄")
     verb, emoji = RP_ACTIONS[action_key]
@@ -816,9 +850,9 @@ async def rp_pat(m):
 
 @dp.message(Command("флирт", "flirt"))
 async def rp_flirt(m):
-    target = m.reply_to_message.from_user if m.reply_to_message and m.reply_to_message.from_user else None
+    target = await resolve_target(m)
     if not target:
-        return await m.answer("Ответь на сообщение человека командой /флирт 🙂")
+        return await m.answer("Укажи пользователя: /флирт @username (или ответь на его сообщение). 🙂")
     if target.id == m.from_user.id:
         return await m.answer("С собой лучше просто поделиться комплиментом 😄")
     lines = [
@@ -831,16 +865,16 @@ async def rp_flirt(m):
 
 @dp.message(Command("репутация"))
 async def rep(m):
-    target=m.reply_to_message.from_user if m.reply_to_message and m.reply_to_message.from_user else m.from_user
+    target=await resolve_target(m) or m.from_user
     async with aiosqlite.connect(DB_PATH) as db:
         cur=await db.execute("SELECT score FROM reputation WHERE chat_id=? AND user_id=?",(m.chat.id,target.id))
         row=await cur.fetchone()
     await m.answer(f"⭐ Репутация {mention(target)}: {row[0] if row else 0}",parse_mode="HTML")
 
 async def rep_change(m, delta):
-    if not m.reply_to_message or not m.reply_to_message.from_user:
-        return await m.answer("Ответь на сообщение пользователя.")
-    target=m.reply_to_message.from_user
+    target = await resolve_target(m)
+    if not target:
+        return await m.answer("Укажи пользователя: /репплюс @username (или ответь на его сообщение).")
     if target.id==m.from_user.id: return await m.answer("Нельзя менять собственную репутацию.")
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("INSERT OR IGNORE INTO reputation(chat_id,user_id,score) VALUES(?,?,0)",(m.chat.id,target.id))
@@ -916,6 +950,8 @@ async def delete_replied_message(m: Message):
 async def count_regular_message(m):
     if not m.from_user or m.chat.type == "private":
         return
+    # Сохраняем username каждого активного участника, чтобы команды с @username работали без reply.
+    await ensure_user(m.from_user)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "INSERT INTO message_stats(chat_id,user_id,messages) VALUES(?,?,1) "

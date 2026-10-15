@@ -1,45 +1,18 @@
-# DropGram Iris Bot v3 — expanded modules
+# DropGram Iris
 
-Python 3.11+, aiogram 3.x, SQLite, polling, custom Bot API server.
-
-## Included commands
-- Core: `/start`, `/help`, `/id`
-- Profile/economy: `/profile`, `/balance`, `/bio`, `/daily`, `/pay`
-- Group: `/rules`, `/setrules`, `/setwelcome`, `/welcomeon`, `/welcomeoff`, `/warnlimit`
-- Moderation: `/warn`, `/warnings`, `/unwarn`, `/mute`, `/unmute`, `/ban`, `/unban`, `/kick`, `/purge`, `/modlog`
-- Clans: `/clancreate`, `/clans`, `/clanjoin`, `/clanleave`, `/myclan`
-- Marriage: `/marry` (reply), `/marry_yes`, `/marry_no`, `/my_marriage`, `/divorce`, `/marriages`
-- Entertainment: `/choose`, `/random`, `/roll`, `/joke`, `/compliment`, `/ship` (reply)
-- Reputation: `/rep`, `/rep_plus`, `/rep_minus` (reply)
-- Notes: `/note name | text`, `/notes`, `/noteget name`, `/notedel name`
-
-## Local run
-Copy `.env.example` to `.env`, set `BOT_TOKEN`, then run:
-```bash
-pip install -r requirements.txt
-python bot.py
-```
+Telegram-бот для управления группами, модерации и развлечений.
 
 ## Render
-Use a Background Worker or Blueprint. Build: `pip install -r requirements.txt`; Start: `python bot.py`. Add `BOT_TOKEN` as an environment variable. Polling does not need an inbound port. `render.yaml` uses a persistent disk for SQLite.
+- Build Command: `pip install -r requirements.txt`
+- Start Command: `python bot.py`
+- Для Web Service бот поднимает HTTP health endpoint на `0.0.0.0:$PORT`.
+- Environment: `BOT_TOKEN` обязателен; `API_URL` задавайте только если используете собственный совместимый Telegram Bot API Server. Для обычного Telegram Bot API уберите `API_URL` из окружения, чтобы использовался стандартный endpoint.
+- Для сохранения SQLite добавьте Persistent Disk в `/var/data` и установите `DB_PATH=/var/data/dropgram.sqlite3`.
 
-## Important
-This is an independent implementation of selected Iris-like features, not a full clone of every command on the reference page. The official command list includes many more modules (moderator ranks/access rules, chat networks, triggers, statistics, anti-spam/scam databases, VIP, bookmarks, timers, catalog, exchange, inline mode, business bot, reports, giveaways, and more). Those need separate implementation and compatibility testing. The marriage and entertainment commands here are custom, simple versions.
-The API server must support the Bot API methods used; otherwise affected actions will return errors.
+## Команды
+Команды модерации: `/mute`, `/unmute`, `/ban`, `/warn`, `/unwarn`, `/kick`, `/softban`.
+Можно ответить на сообщение или указать известного боту пользователя по `@username`/ID. Пример: `/mute @username 30м флуд`.
+Развлечения поддерживают ответ на сообщение и `@username`, например `/обнять @username`, `/пнуть @username`, `/шип @username`.
+Команда `/смс` удаляет сообщение, на которое ответили, и само сообщение с командой; бот должен иметь право удалять сообщения.
 
-
-## Дополнительно в v5
-- `/stats`, `/top` — статистика сообщений и топ активности в группе.
-- `/bookmark` ответом на сообщение, `/bookmarks`, `/bookmarkdel НОМЕР` — личные закладки в чате.
-- `/timer СЕКУНДЫ текст` — напоминание (пока бот работает; при перезапуске таймеры сбрасываются).
-- `/поддержать`, `/пожатьруку`, `/танцевать` — дополнительные шуточные действия.
-- Развлекательные команды без ставок и азартных игр.
-
-
-## v6 — меню команд и улучшенная модерация
-- `/help`, `/commands`, `/команды`, `/списоккоманд` открывают меню с отдельными разделами команд.
-- Мут с длительностью: `/mute 30m причина`, `/mute 1h причина`, `/mute 2d причина`. Поддерживаются минуты, часы, дни и недели на русском/английском.
-- Временный или постоянный бан: `/ban 1d причина` или `/ban причина` (навсегда).
-- `/softban причина` — удалить участника баном с немедленным разбаном.
-- `/unban USER_ID` и `/unmute` снимают соответствующие ограничения.
-- Бот должен быть администратором группы с правами блокировать участников и ограничивать участников. Совместимость конкретного DropGram Bot API зависит от поддерживаемых методов.
+Telegram Bot API не позволяет боту искать любого участника группы по произвольному username. Поэтому `@username` должен быть уже замечен ботом в сообщении/команде в группе. Если пользователь ещё не писал при работающем боте, попросите его написать сообщение.
