@@ -159,27 +159,29 @@ async def log_action(chat_id, uid, mid, action, reason=""):
         await db.commit()
 
 async def resolve_target(message):
-    """Find the target. A real replied-to user always has priority over typed arguments."""
-    # In Telegram a reply contains the original message as reply_to_message.
-    # Resolve this first, before parsing command arguments or looking in the database.
+    """Resolve a target consistently: replied user, @username, or numeric Telegram ID."""
     replied = getattr(message, "reply_to_message", None)
     if replied is not None:
+        # Normal reply is always the most reliable way to identify a group member.
         replied_user = getattr(replied, "from_user", None)
-        if replied_user is not None:
-            log.info("Target resolved from reply: chat=%s target=%s command=%r",
-                     message.chat.id, replied_user.id, message.text)
+        if replied_user is not None and not getattr(replied_user, "is_bot", False):
             return replied_user
-        # Messages sent on behalf of a channel/anonymous admin have sender_chat, not a user.
+        # Anonymous admin/channel posts do not expose a personal Telegram user ID.
         if getattr(replied, "sender_chat", None) is not None:
-            log.warning("Reply target is sender_chat, not a user: chat=%s", message.chat.id)
+            log.warning("Target reply is an anonymous admin/channel post; no personal user ID available")
 
-    # Parse arguments after command. Also supports /command@BotName target.
-    args = (message.text or "").split(maxsplit=1)
-    if len(args) < 2:
+    text = (getattr(message, "text", None) or "").strip()
+    # Drop the command and optional @BotName suffix, keep remaining arguments.
+    pieces = text.split(maxsplit=1)
+    if len(pieces) < 2:
         return None
-    token = args[1].strip().split(maxsplit=1)[0].rstrip(",;.!?()[]{}")
+    token = pieces[1].strip().split(maxsplit=1)[0].strip(" ,;.!?()[]{}")
+
     if token.startswith("@"):
         username = token[1:].casefold()
+        if not username:
+            return None
+        # First use the local cache populated from messages and group events.
         async with aiosqlite.connect(DB_PATH) as db:
             cur = await db.execute(
                 "SELECT user_id, username, full_name FROM users WHERE lower(username)=? LIMIT 1",
@@ -187,19 +189,31 @@ async def resolve_target(message):
             )
             row = await cur.fetchone()
         if row:
-            return SimpleNamespace(id=row[0], username=row[1], full_name=row[2] or row[1], is_bot=False)
+            uid, uname, full_name = row
+            if int(uid) != int(message.from_user.id):
+                return SimpleNamespace(id=int(uid), username=uname, full_name=full_name or uname, is_bot=False)
         return None
+
     if token.isdigit():
         uid = int(token)
+        if uid == int(message.from_user.id):
+            return message.from_user
+        # get_chat_member returns a ChatMember wrapper, so return its .user.
         try:
             member = await message.bot.get_chat_member(message.chat.id, uid)
-            return member.user
-        except TelegramAPIError:
-            async with aiosqlite.connect(DB_PATH) as db:
-                cur = await db.execute("SELECT user_id, username, full_name FROM users WHERE user_id=?", (uid,))
-                row = await cur.fetchone()
-            if row:
-                return SimpleNamespace(id=row[0], username=row[1], full_name=row[2] or f"ID {uid}", is_bot=False)
+            user = getattr(member, "user", None)
+            if user is not None and not getattr(user, "is_bot", False):
+                return user
+        except TelegramAPIError as exc:
+            log.info("Could not resolve target ID %s via get_chat_member: %s", uid, exc)
+        # Fall back to the known-user cache when Telegram lookup is unavailable.
+        async with aiosqlite.connect(DB_PATH) as db:
+            cur = await db.execute(
+                "SELECT user_id, username, full_name FROM users WHERE user_id=? LIMIT 1", (uid,)
+            )
+            row = await cur.fetchone()
+        if row:
+            return SimpleNamespace(id=int(row[0]), username=row[1], full_name=row[2] or f"ID {uid}", is_bot=False)
     return None
 
 def command_tail(message, target=None):
@@ -275,7 +289,7 @@ async def show_commands(c: CallbackQuery):
 COMMAND_SECTIONS = {
     "main": ("📌 Основные", "<b>Основные команды</b>\n/start — запуск бота\n/help или /команды — меню команд\n/id — ID пользователя и чата\n/profile — профиль\n/balance — баланс\n/bio ТЕКСТ — описание профиля\n/daily — ежедневный бонус\n/pay СУММА (ответом) — перевести монеты"),
     "moderation": ("🛡 Модерация", "<b>Модерация</b> (в большинстве случаев ответом на сообщение)\n/warn [причина] — предупреждение\n/warnings — активные предупреждения\n/unwarn — снять последнее предупреждение\n/mute 30m причина — мут на 30 минут\n/mute 1h причина — мут на 1 час\n/mute 2d причина — мут на 2 дня\n/unmute — снять мут\n/ban [срок] [причина] — бан навсегда или на срок\nПример: /ban 1d спам\n/unban USER_ID — разбанить по ID\n/softban [причина] — удалить и сразу снять бан\n/kick — исключить без постоянного бана\n/purge ЧИСЛО (ответом) — удалить сообщения\n/modlog — журнал действий\n/setrules ТЕКСТ — установить правила\n/warnlimit ЧИСЛО — лимит предупреждений"),
-    "fun": ("🎭 Развлечения", "<b>Развлечения</b> (ответом на сообщение или через @username)\n/обнять — обнять\n/пнуть — шуточный мультяшный пинок\n/датьпять — дать пять\n/погладить — дружеское действие\n/поддержать — поддержать\n/пожатьруку — рукопожатие\n/танцевать — танец\n/флирт — лёгкий подкат\n/шип — совместимость\n/выбери ВАРИАНТ1 | ВАРИАНТ2 — выбор\n/рандом — случайное число\n/кубик — кубик\n/анекдот — шутка\n/комплимент — комплимент"),
+    "fun": ("🎭 Развлечения", "<b>Развлечения</b> (ответом на сообщение или через @username)\n/обнять — обнять\n/пнуть или /шлепнуть — шуточное мультяшное действие\n/датьпять — дать пять\n/погладить — дружеское действие\n/поддержать — поддержать\n/пожатьруку — рукопожатие\n/танцевать — танец\n/флирт — лёгкий подкат\n/шип — совместимость\n/выбери ВАРИАНТ1 | ВАРИАНТ2 — выбор\n/рандом — случайное число\n/кубик — кубик\n/анекдот — шутка\n/комплимент — комплимент"),
     "social": ("💞 Отношения", "<b>Отношения и сообщество</b>\n/брак — предложить брак (ответом на сообщение)\nКнопки «Согласиться» и «Отказаться» — ответ на предложение\n/мой_брак — посмотреть свой статус\n/развод — развестись\n/браки — список браков\n/rep — репутация (ответом)\n/реп_плюс — повысить репутацию\n/реп_минус — понизить репутацию\n/клансоздать НАЗВАНИЕ — создать клан\n/кланы — список кланов\n/кланвступить ID — вступить\n/кланвыйти — выйти\n/мойклан — мой клан"),
     "tools": ("🧰 Инструменты", "<b>Инструменты чата</b>\n/rules — правила чата\n/setwelcome ТЕКСТ — задать приветствие\n/welcomeon и /welcomeoff — приветствие вкл./выкл.\n/note НАЗВАНИЕ | ТЕКСТ — сохранить заметку (админ)\n/заметки — список заметок\n/заметкапоказать НАЗВАНИЕ — показать заметку\n/заметкаудалить НАЗВАНИЕ — удалить заметку (админ)\n/stats — статистика чата\n/top — топ активности\n/bookmark (ответом) — сохранить сообщение\n/bookmarks — мои закладки\n/bookmarkdel НОМЕР — удалить закладку\n/timer СЕКУНДЫ ТЕКСТ — напоминание")
 }
@@ -717,7 +731,7 @@ async def marry(m):
         return await m.answer("Нажми кнопку «Отказаться» в сообщении с предложением брака.")
     b = await resolve_target(m)
     if not b:
-        return await m.answer("Не удалось определить пользователя. Открой именно сообщение участника, нажми «Ответить» и отправь /брак отдельным сообщением. Не отвечай на сообщение самого бота или анонимного администратора.")
+        return await m.answer("Не удалось определить участника. Ответь на обычное сообщение человека командой /брак, либо укажи /брак @username или /брак ID. Нельзя определить автора анонимного сообщения администратора или публикации канала.")
     a = m.from_user
     if a.id == b.id or getattr(b, "is_bot", False):
         return await m.answer("Выбери другого участника группы.")
@@ -858,7 +872,7 @@ async def ship(m):
         pct=random.randint(0,100)
         await m.answer(f"💞 Совместимость {mention(a)} и {mention(b)}: {pct}% — это просто случайная игра!",parse_mode="HTML")
     else:
-        await m.answer("Укажи пользователя: /шип @username (или ответь на его сообщение).")
+        await m.answer("Не удалось определить пользователя. Ответь на обычное сообщение участника командой /шип или используй /шип @username либо /шип ID. Для @username бот должен ранее видеть его сообщение.")
 
 
 # Короткие мемные RP-команды. Все ответы шуточные и без подробного насилия.
@@ -872,7 +886,7 @@ RP_ACTIONS = {
 async def rp_action(m, action_key):
     target = await resolve_target(m)
     if not target:
-        return await m.answer("Укажи пользователя: /обнять @username (или ответь на его сообщение). Бот должен хотя бы раз видеть этого пользователя в чате.")
+        return await m.answer("Не удалось определить пользователя. Ответь на обычное сообщение участника командой /обнять, либо укажи /обнять @username или /обнять ID. Для @username бот должен хотя бы раз увидеть сообщение этого человека; ID должен принадлежать участнику этой группы.")
     if target.id == m.from_user.id:
         return await m.answer("Самому себе так не получится 😄")
     verb, emoji = RP_ACTIONS[action_key]
@@ -890,7 +904,7 @@ async def rp_action(m, action_key):
 async def rp_hug(m):
     await rp_action(m, "hug")
 
-@dp.message(Command("пнуть", "пинок"))
+@dp.message(Command("пнуть", "пинок", "шлепнуть"))
 async def rp_kick(m):
     await rp_action(m, "kick")
 

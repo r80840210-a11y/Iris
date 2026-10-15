@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: dropgram-iris-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: API_URL
+        value: http://67.211.221.152:8888
+      - key: DB_PATH
+        value: /var/data/dropgram.sqlite3
+      - key: START_BALANCE
+        value: "100"
+    disk:
+      name: dropgram-iris-data
+      mountPath: /var/data
+      sizeGB: 1
