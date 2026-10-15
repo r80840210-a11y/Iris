@@ -165,7 +165,8 @@ async def resolve_target(message):
     args = (message.text or "").split()
     if len(args) < 2:
         return None
-    token = args[1].strip().rstrip(",")
+    token = args[1].strip().rstrip(",;.!?()[]{}")
+    # Telegram username is case-insensitive; accept @username and plain numeric ID.
     if token.startswith("@"):
         username = token[1:].casefold()
         async with aiosqlite.connect(DB_PATH) as db:
@@ -253,7 +254,7 @@ COMMAND_SECTIONS = {
     "main": ("📌 Основные", "<b>Основные команды</b>\n/start — запуск бота\n/help или /команды — меню команд\n/id — ID пользователя и чата\n/profile — профиль\n/balance — баланс\n/bio ТЕКСТ — описание профиля\n/daily — ежедневный бонус\n/pay СУММА (ответом) — перевести монеты"),
     "moderation": ("🛡 Модерация", "<b>Модерация</b> (в большинстве случаев ответом на сообщение)\n/warn [причина] — предупреждение\n/warnings — активные предупреждения\n/unwarn — снять последнее предупреждение\n/mute 30m причина — мут на 30 минут\n/mute 1h причина — мут на 1 час\n/mute 2d причина — мут на 2 дня\n/unmute — снять мут\n/ban [срок] [причина] — бан навсегда или на срок\nПример: /ban 1d спам\n/unban USER_ID — разбанить по ID\n/softban [причина] — удалить и сразу снять бан\n/kick — исключить без постоянного бана\n/purge ЧИСЛО (ответом) — удалить сообщения\n/modlog — журнал действий\n/setrules ТЕКСТ — установить правила\n/warnlimit ЧИСЛО — лимит предупреждений"),
     "fun": ("🎭 Развлечения", "<b>Развлечения</b> (ответом на сообщение или через @username)\n/обнять — обнять\n/пнуть — шуточный мультяшный пинок\n/датьпять — дать пять\n/погладить — дружеское действие\n/поддержать — поддержать\n/пожатьруку — рукопожатие\n/танцевать — танец\n/флирт — лёгкий подкат\n/шип — совместимость\n/выбери ВАРИАНТ1 | ВАРИАНТ2 — выбор\n/рандом — случайное число\n/кубик — кубик\n/анекдот — шутка\n/комплимент — комплимент"),
-    "social": ("💞 Отношения", "<b>Отношения и сообщество</b>\n/брак (ответом) — предложить брак\n/брак_да — принять предложение\n/брак_нет — отклонить\n/мой_брак — посмотреть свой статус\n/развод — развестись\n/браки — список браков\n/rep — репутация (ответом)\n/реп_плюс — повысить репутацию\n/реп_минус — понизить репутацию\n/клансоздать НАЗВАНИЕ — создать клан\n/кланы — список кланов\n/кланвступить ID — вступить\n/кланвыйти — выйти\n/мойклан — мой клан"),
+    "social": ("💞 Отношения", "<b>Отношения и сообщество</b>\n/брак — предложить брак (ответом на сообщение)\nКнопки «Согласиться» и «Отказаться» — ответ на предложение\n/мой_брак — посмотреть свой статус\n/развод — развестись\n/браки — список браков\n/rep — репутация (ответом)\n/реп_плюс — повысить репутацию\n/реп_минус — понизить репутацию\n/клансоздать НАЗВАНИЕ — создать клан\n/кланы — список кланов\n/кланвступить ID — вступить\n/кланвыйти — выйти\n/мойклан — мой клан"),
     "tools": ("🧰 Инструменты", "<b>Инструменты чата</b>\n/rules — правила чата\n/setwelcome ТЕКСТ — задать приветствие\n/welcomeon и /welcomeoff — приветствие вкл./выкл.\n/note НАЗВАНИЕ | ТЕКСТ — сохранить заметку (админ)\n/заметки — список заметок\n/заметкапоказать НАЗВАНИЕ — показать заметку\n/заметкаудалить НАЗВАНИЕ — удалить заметку (админ)\n/stats — статистика чата\n/top — топ активности\n/bookmark (ответом) — сохранить сообщение\n/bookmarks — мои закладки\n/bookmarkdel НОМЕР — удалить закладку\n/timer СЕКУНДЫ ТЕКСТ — напоминание")
 }
 
@@ -685,46 +686,77 @@ async def get_active_marriage(chat_id, uid):
 @dp.message(Command("marry", "брак", "жениться"))
 async def marry(m):
     if m.chat.type == "private":
-        return await m.answer("Предложение брака можно отправить в группе, ответив на сообщение.")
+        return await m.answer("Предложение брака работает в группе.")
+    parts = (m.text or "").split(maxsplit=1)
+    # Приоритет — пользователь, на сообщение которого ответили. Можно написать просто /брак.
+    if len(parts) > 1 and parts[1].strip().casefold() in ("да", "yes", "принять"):
+        return await m.answer("Нажми кнопку «Согласиться» в сообщении с предложением брака.")
+    if len(parts) > 1 and parts[1].strip().casefold() in ("нет", "no", "отклонить"):
+        return await m.answer("Нажми кнопку «Отказаться» в сообщении с предложением брака.")
     b = await resolve_target(m)
     if not b:
-        return await m.answer("Укажи пользователя: /брак @username (или ответь на его сообщение). Если бот ещё не видел его в чате, сначала пусть напишет любое сообщение.")
-    a=m.from_user
-    if a.id==b.id or b.is_bot:
+        return await m.answer("Чтобы предложить брак, ответь на сообщение пользователя командой /брак. Например: ответ на сообщение → /брак. Также можно указать ID: /брак 123456789.")
+    a = m.from_user
+    if a.id == b.id or getattr(b, "is_bot", False):
         return await m.answer("Выбери другого участника группы.")
-    if await get_active_marriage(m.chat.id,a.id) or await get_active_marriage(m.chat.id,b.id):
+    if await get_active_marriage(m.chat.id, a.id) or await get_active_marriage(m.chat.id, b.id):
         return await m.answer("Один из вас уже состоит в браке.")
     async with aiosqlite.connect(DB_PATH) as db:
-        cur=await db.execute("SELECT id FROM marriages WHERE chat_id=? AND user1=? AND user2=? AND status='pending'",(m.chat.id,a.id,b.id))
-        if await cur.fetchone():
-            return await m.answer("Предложение уже отправлено. Получатель может ответить /брак_да или /брак_нет.")
-        await db.execute("INSERT INTO marriages(chat_id,user1,user2,status,created_at) VALUES(?,?,?,'pending',?)",(m.chat.id,a.id,b.id,now()))
+        cur = await db.execute("SELECT id FROM marriages WHERE chat_id=? AND user1=? AND user2=? AND status='pending'", (m.chat.id, a.id, b.id))
+        existing = await cur.fetchone()
+        if existing:
+            return await m.answer("Предложение этому пользователю уже отправлено.")
+        cur = await db.execute("INSERT INTO marriages(chat_id,user1,user2,status,created_at) VALUES(?,?,?,'pending',?)", (m.chat.id, a.id, b.id, now()))
+        marriage_id = cur.lastrowid
         await db.commit()
-    await m.answer(f"💍 {mention(a)} предлагает брак {mention(b)}!\nПолучатель может ответить командой /брак_да или /брак_нет.",parse_mode="HTML")
+    kb = InlineKeyboardBuilder()
+    kb.button(text="💍 Согласиться", callback_data=f"marriage:yes:{marriage_id}")
+    kb.button(text="❌ Отказаться", callback_data=f"marriage:no:{marriage_id}")
+    kb.adjust(2)
+    await m.answer(f"💍 {mention(a)} предлагает брак {mention(b)}!\n{mention(b)}, выбери действие кнопкой ниже.", parse_mode="HTML", reply_markup=kb.as_markup())
+
+@dp.callback_query(F.data.startswith("marriage:"))
+async def marriage_decision(c: CallbackQuery):
+    try:
+        _, decision, raw_id = c.data.split(":", 2)
+        marriage_id = int(raw_id)
+    except (ValueError, AttributeError):
+        return await c.answer("Некорректное предложение.", show_alert=True)
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT id,chat_id,user1,user2,status FROM marriages WHERE id=?", (marriage_id,))
+        row = await cur.fetchone()
+        if not row or row[1] != c.message.chat.id or row[4] != "pending":
+            return await c.answer("Предложение уже недействительно.", show_alert=True)
+        if c.from_user.id != row[3]:
+            return await c.answer("Эти кнопки предназначены только получателю предложения.", show_alert=True)
+        if decision == "yes":
+            if await get_active_marriage(row[1], row[2]) or await get_active_marriage(row[1], row[3]):
+                await db.execute("UPDATE marriages SET status='declined' WHERE id=?", (marriage_id,))
+                await db.commit()
+                await c.answer("Один из вас уже состоит в браке.", show_alert=True)
+                return
+            await db.execute("UPDATE marriages SET status='active' WHERE id=?", (marriage_id,))
+            text = "💍 Поздравляем! Предложение принято — вы теперь в браке. Посмотреть статус: /мой_брак"
+        elif decision == "no":
+            await db.execute("UPDATE marriages SET status='declined' WHERE id=?", (marriage_id,))
+            text = "❌ Предложение брака отклонено."
+        else:
+            return await c.answer("Неизвестное действие.", show_alert=True)
+        await db.commit()
+    try:
+        await c.message.edit_reply_markup(reply_markup=None)
+    except TelegramAPIError:
+        pass
+    await c.message.answer(text)
+    await c.answer("Готово")
 
 @dp.message(Command("marry_yes", "брак_да"))
 async def marry_yes(m):
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur=await db.execute("SELECT id,user1,user2 FROM marriages WHERE chat_id=? AND user2=? AND status='pending' ORDER BY id DESC LIMIT 1",(m.chat.id,m.from_user.id))
-        row=await cur.fetchone()
-        if not row: return await m.answer("У тебя нет ожидающих предложений брака.")
-        if await get_active_marriage(m.chat.id,row[1]) or await get_active_marriage(m.chat.id,row[2]):
-            await db.execute("UPDATE marriages SET status='declined' WHERE id=?",(row[0],))
-            await db.commit()
-            return await m.answer("Предложение отменено: один из пользователей уже состоит в браке.")
-        await db.execute("UPDATE marriages SET status='active' WHERE id=?",(row[0],))
-        await db.commit()
-    await m.answer("💍 Поздравляем! Брак заключён. Используй /мой_брак для просмотра.")
+    await m.answer("Теперь принимай предложение кнопкой «💍 Согласиться» под сообщением с предложением брака.")
 
 @dp.message(Command("marry_no", "брак_нет"))
 async def marry_no(m):
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur=await db.execute("SELECT id,user1 FROM marriages WHERE chat_id=? AND user2=? AND status='pending' ORDER BY id DESC LIMIT 1",(m.chat.id,m.from_user.id))
-        row=await cur.fetchone()
-        if not row: return await m.answer("У тебя нет ожидающих предложений.")
-        await db.execute("UPDATE marriages SET status='declined' WHERE id=?",(row[0],))
-        await db.commit()
-    await m.answer("Предложение отклонено.")
+    await m.answer("Теперь отклоняй предложение кнопкой «❌ Отказаться» под сообщением с предложением брака.")
 
 @dp.message(Command("my_marriage", "мой_брак"))
 async def my_marriage(m):
