@@ -159,14 +159,25 @@ async def log_action(chat_id, uid, mid, action, reason=""):
         await db.commit()
 
 async def resolve_target(message):
-    """Resolve a target from a reply, numeric Telegram ID, or a previously seen @username."""
-    if message.reply_to_message and message.reply_to_message.from_user:
-        return message.reply_to_message.from_user
-    args = (message.text or "").split()
+    """Find the target. A real replied-to user always has priority over typed arguments."""
+    # In Telegram a reply contains the original message as reply_to_message.
+    # Resolve this first, before parsing command arguments or looking in the database.
+    replied = getattr(message, "reply_to_message", None)
+    if replied is not None:
+        replied_user = getattr(replied, "from_user", None)
+        if replied_user is not None:
+            log.info("Target resolved from reply: chat=%s target=%s command=%r",
+                     message.chat.id, replied_user.id, message.text)
+            return replied_user
+        # Messages sent on behalf of a channel/anonymous admin have sender_chat, not a user.
+        if getattr(replied, "sender_chat", None) is not None:
+            log.warning("Reply target is sender_chat, not a user: chat=%s", message.chat.id)
+
+    # Parse arguments after command. Also supports /command@BotName target.
+    args = (message.text or "").split(maxsplit=1)
     if len(args) < 2:
         return None
-    token = args[1].strip().rstrip(",;.!?()[]{}")
-    # Telegram username is case-insensitive; accept @username and plain numeric ID.
+    token = args[1].strip().split(maxsplit=1)[0].rstrip(",;.!?()[]{}")
     if token.startswith("@"):
         username = token[1:].casefold()
         async with aiosqlite.connect(DB_PATH) as db:
@@ -175,16 +186,15 @@ async def resolve_target(message):
                 (username,),
             )
             row = await cur.fetchone()
-        if not row:
-            return None
-        return SimpleNamespace(id=row[0], username=row[1], full_name=row[2] or row[1], is_bot=False)
+        if row:
+            return SimpleNamespace(id=row[0], username=row[1], full_name=row[2] or row[1], is_bot=False)
+        return None
     if token.isdigit():
         uid = int(token)
         try:
             member = await message.bot.get_chat_member(message.chat.id, uid)
             return member.user
         except TelegramAPIError:
-            # ID may still be known to the bot even if Telegram won't return membership.
             async with aiosqlite.connect(DB_PATH) as db:
                 cur = await db.execute("SELECT user_id, username, full_name FROM users WHERE user_id=?", (uid,))
                 row = await cur.fetchone()
@@ -209,6 +219,18 @@ def start_menu(bot_username=""):
     kb.button(text="📚 Команды", callback_data="show_commands")
     kb.adjust(1)
     return kb.as_markup()
+
+@dp.message.outer_middleware()
+async def remember_chat_users(handler, event, data):
+    """Remember users from all incoming group messages, not only /start."""
+    user = getattr(event, "from_user", None)
+    if user is not None and not getattr(user, "is_bot", False):
+        try:
+            await ensure_user(user)
+        except Exception:
+            log.exception("Could not remember user %s", user.id)
+    return await handler(event, data)
+
 
 @dp.message(CommandStart())
 async def start(m: Message):
@@ -695,7 +717,7 @@ async def marry(m):
         return await m.answer("Нажми кнопку «Отказаться» в сообщении с предложением брака.")
     b = await resolve_target(m)
     if not b:
-        return await m.answer("Чтобы предложить брак, ответь на сообщение пользователя командой /брак. Например: ответ на сообщение → /брак. Также можно указать ID: /брак 123456789.")
+        return await m.answer("Не удалось определить пользователя. Открой именно сообщение участника, нажми «Ответить» и отправь /брак отдельным сообщением. Не отвечай на сообщение самого бота или анонимного администратора.")
     a = m.from_user
     if a.id == b.id or getattr(b, "is_bot", False):
         return await m.answer("Выбери другого участника группы.")
