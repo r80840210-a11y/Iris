@@ -1049,17 +1049,40 @@ async def rp_dance(m):
 
 
 async def main():
-    if not TOKEN: raise RuntimeError("Не задан BOT_TOKEN в .env или переменных окружения Render.")
+    if not TOKEN:
+        raise RuntimeError("Не задан BOT_TOKEN в переменных окружения Render.")
+
     await init_db()
-    session=AiohttpSession(api=TelegramAPIServer.from_base(API_URL))
-    bot=Bot(token=TOKEN,session=session)
+    session = AiohttpSession(api=TelegramAPIServer.from_base(API_URL))
+    bot = Bot(token=TOKEN, session=session)
+
+    # Render Web Service требует, чтобы приложение слушало порт PORT.
+    # Этот лёгкий HTTP endpoint также позволяет проверить, что процесс жив.
+    from aiohttp import web
+
+    async def health(_request):
+        return web.json_response({"status": "ok", "service": "DropGram Iris"})
+
+    app = web.Application()
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
+    runner = web.AppRunner(app)
+
     try:
-        me=await bot.get_me()
-        log.info("Запущен @%s; API=%s",me.username,API_URL)
-        await dp.start_polling(bot,allowed_updates=dp.resolve_used_update_types())
+        me = await bot.get_me()
+        log.info("Запущен @%s; API=%s", me.username, API_URL)
+        await runner.setup()
+        port = int(os.getenv("PORT", "10000"))
+        site = web.TCPSite(runner, "0.0.0.0", port)
+        await site.start()
+        log.info("Health server слушает 0.0.0.0:%s", port)
+        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
+        await runner.cleanup()
         await bot.session.close()
 
-if __name__=="__main__":
-    try: asyncio.run(main())
-    except (KeyboardInterrupt,SystemExit): pass
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        pass
