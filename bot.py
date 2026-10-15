@@ -82,6 +82,10 @@ CREATE TABLE IF NOT EXISTS message_stats(
  chat_id INTEGER NOT NULL, user_id INTEGER NOT NULL, messages INTEGER NOT NULL DEFAULT 0,
  PRIMARY KEY(chat_id,user_id)
 );
+CREATE TABLE IF NOT EXISTS message_authors(
+ chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+ PRIMARY KEY(chat_id,message_id)
+);
 CREATE TABLE IF NOT EXISTS bookmarks(
  id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
  body TEXT NOT NULL, created_at TEXT NOT NULL
@@ -158,6 +162,28 @@ async def log_action(chat_id, uid, mid, action, reason=""):
                          (chat_id, uid, mid, action, reason, now()))
         await db.commit()
 
+async def author_from_cache(chat_id, message_id):
+    if not message_id:
+        return None
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT u.user_id, u.username, u.full_name FROM message_authors a "
+            "JOIN users u ON u.user_id=a.user_id WHERE a.chat_id=? AND a.message_id=?",
+            (chat_id, message_id))
+        row = await cur.fetchone()
+    if row:
+        return SimpleNamespace(id=int(row[0]), username=row[1], full_name=row[2] or f"ID {row[0]}", is_bot=False)
+    return None
+
+async def remember_author(message):
+    user = getattr(message, "from_user", None)
+    if user is None or getattr(user, "is_bot", False):
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("INSERT OR REPLACE INTO message_authors(chat_id,message_id,user_id) VALUES(?,?,?)",
+                         (message.chat.id, message.message_id, user.id))
+        await db.commit()
+
 async def resolve_target(message):
     """Resolve a target consistently: replied user, @username, or numeric Telegram ID."""
     replied = getattr(message, "reply_to_message", None)
@@ -166,9 +192,16 @@ async def resolve_target(message):
         replied_user = getattr(replied, "from_user", None)
         if replied_user is not None and not getattr(replied_user, "is_bot", False):
             return replied_user
+        # Некоторые Bot API-серверы не отдают from_user внутри reply_to_message.
+        # Тогда берём автора из кэша, который заполняется при каждом входящем сообщении.
+        cached = await author_from_cache(message.chat.id, getattr(replied, "message_id", None))
+        if cached is not None and not getattr(cached, "is_bot", False):
+            return cached
         # Anonymous admin/channel posts do not expose a personal Telegram user ID.
         if getattr(replied, "sender_chat", None) is not None:
             log.warning("Target reply is an anonymous admin/channel post; no personal user ID available")
+        else:
+            log.warning("Could not resolve reply author. reply_to_message=%s", replied.model_dump_json(exclude_none=True) if hasattr(replied, "model_dump_json") else replied)
 
     text = (getattr(message, "text", None) or "").strip()
     # Drop the command and optional @BotName suffix, keep remaining arguments.
@@ -241,8 +274,17 @@ async def remember_chat_users(handler, event, data):
     if user is not None and not getattr(user, "is_bot", False):
         try:
             await ensure_user(user)
+            await remember_author(event)
         except Exception:
             log.exception("Could not remember user %s", user.id)
+    replied = getattr(event, "reply_to_message", None)
+    ru = getattr(replied, "from_user", None) if replied else None
+    if ru is not None and not getattr(ru, "is_bot", False):
+        try:
+            await ensure_user(ru)
+            await remember_author(replied)
+        except Exception:
+            log.exception("Could not remember replied user")
     return await handler(event, data)
 
 
@@ -323,14 +365,22 @@ async def command_section(c: CallbackQuery):
     await c.message.edit_text(section[1], reply_markup=kb.as_markup(), parse_mode="HTML")
     await c.answer()
 
+@dp.message(Command("debug"))
+async def debug_cmd(m):
+    r = m.reply_to_message
+    if not r:
+        return await m.answer("Ответь командой /debug на нужное сообщение.")
+    raw = r.model_dump_json(exclude_none=True, indent=1) if hasattr(r, "model_dump_json") else str(r)
+    await m.answer(f"<pre>{safe(raw[:3500])}</pre>", parse_mode="HTML")
+
 @dp.message(Command("id"))
 async def id_cmd(m):
-    target = m.reply_to_message.from_user if m.reply_to_message and m.reply_to_message.from_user else m.from_user
+    target = await resolve_target(m) or m.from_user
     await m.answer(f"👤 ID: <code>{target.id}</code>\n💬 Chat ID: <code>{m.chat.id}</code>", parse_mode="HTML")
 
 @dp.message(Command("profile", "профиль"))
 async def profile(m):
-    u = m.reply_to_message.from_user if m.reply_to_message and m.reply_to_message.from_user else m.from_user
+    u = await resolve_target(m) or m.from_user
     await ensure_user(u)
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT balance,bio,created_at FROM users WHERE user_id=?", (u.id,))
@@ -375,12 +425,13 @@ async def daily(m):
 
 @dp.message(Command("pay"))
 async def pay(m):
-    if not m.reply_to_message or not m.reply_to_message.from_user:
+    receiver = await resolve_target(m) if m.reply_to_message else None
+    if not receiver:
         return await m.answer("Ответь на сообщение пользователя: /pay 25")
     parts = (m.text or "").split()
     if len(parts) != 2 or not parts[1].isdigit():
         return await m.answer("Формат: /pay 25 ответом на сообщение")
-    amount = int(parts[1]); sender=m.from_user; receiver=m.reply_to_message.from_user
+    amount = int(parts[1]); sender=m.from_user
     if amount < 1 or amount > 1000000 or sender.id == receiver.id or receiver.is_bot:
         return await m.answer("Проверь сумму и получателя.")
     await ensure_user(sender); await ensure_user(receiver)
@@ -1123,7 +1174,7 @@ async def timer(m):
 # ── Дополнительные лёгкие RP-команды ─────────────────────────────────────────
 @dp.message(Command("поддержать", "support"))
 async def rp_support(m):
-    target = m.reply_to_message.from_user if m.reply_to_message and m.reply_to_message.from_user else None
+    target = await resolve_target(m) if m.reply_to_message else None
     if not target:
         return await m.answer("Ответь на сообщение человека командой /поддержать 🙂")
     if target.id == m.from_user.id:
@@ -1138,14 +1189,14 @@ async def rp_support(m):
 
 @dp.message(Command("пожатьруку", "handshake"))
 async def rp_handshake(m):
-    target = m.reply_to_message.from_user if m.reply_to_message and m.reply_to_message.from_user else None
+    target = await resolve_target(m) if m.reply_to_message else None
     if not target:
         return await m.answer("Ответь на сообщение человека командой /пожатьруку 🤝")
     await m.answer(f"🤝 {mention(m.from_user)} пожал(а) руку {mention(target)}. Договорились!", parse_mode="HTML")
 
 @dp.message(Command("танцевать", "dance"))
 async def rp_dance(m):
-    target = m.reply_to_message.from_user if m.reply_to_message and m.reply_to_message.from_user else None
+    target = await resolve_target(m) if m.reply_to_message else None
     if target:
         await m.answer(f"🕺 {mention(m.from_user)} пригласил(а) {mention(target)} на танец. Музыка пошла! 🎶", parse_mode="HTML")
     else:
