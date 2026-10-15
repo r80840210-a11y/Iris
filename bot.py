@@ -12,22 +12,25 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, ChatPermissions, CallbackQuery
+from aiogram.types import Message, ChatPermissions, CallbackQuery, ChatMemberUpdated
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramAPIError
 from dotenv import load_dotenv
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("misugram-iris")
+log = logging.getLogger("dropgram-iris")
 
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
 API_URL = os.getenv("API_URL", "http://67.211.221.152:8888").strip().rstrip("/")
-DB_PATH = os.getenv("DB_PATH", "misugram.sqlite3")
+DB_PATH = os.getenv("DB_PATH", "dropgram.sqlite3")
 START_BALANCE = int(os.getenv("START_BALANCE", "100"))
 dp = Dispatcher()
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS known_groups(
+ chat_id INTEGER PRIMARY KEY, title TEXT NOT NULL, added_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS users(
  user_id INTEGER PRIMARY KEY, username TEXT, full_name TEXT,
  balance INTEGER NOT NULL DEFAULT 100, bio TEXT DEFAULT '',
@@ -165,21 +168,61 @@ async def resolve_target(message):
         return u
     return None
 
+def start_menu(bot_username=""):
+    kb = InlineKeyboardBuilder()
+    if bot_username:
+        kb.button(text="➕ Добавить в группу", url=f"https://t.me/{bot_username}?startgroup=true")
+    kb.button(text="👥 Мои группы", callback_data="my_groups")
+    kb.button(text="📚 Команды", callback_data="show_commands")
+    kb.adjust(1)
+    return kb.as_markup()
+
 @dp.message(CommandStart())
 async def start(m: Message):
     await ensure_user(m.from_user)
-    await m.answer("✨ <b>MisuGram Iris — чат-менеджер</b>\n\n"
-                   "Профили, настройки групп, модерация, предупреждения, экономика и кланы.\n"
-                   "Команды: /help\n\n"
-                   "Это независимая реализация; не все функции оригинального Iris доступны без совместимых методов API.",
-                   parse_mode="HTML")
+    me = await m.bot.get_me()
+    text = ("👋 <b>Привет! Я DropGram Iris — менеджер чатов.</b>\n\n"
+            "Помогаю управлять группой: модерация, предупреждения, настройки, развлечения, репутация и экономика.\n\n"
+            "➕ Добавь меня в группу, выдай нужные права администратора, а затем используй /help.\n"
+            "Выбери действие ниже:")
+    await m.answer(text, parse_mode="HTML", reply_markup=start_menu(me.username or ""))
+
+@dp.my_chat_member()
+async def track_group(event: ChatMemberUpdated):
+    chat = event.chat
+    if chat.type not in ("group", "supergroup"):
+        return
+    new_status = event.new_chat_member.status
+    async with aiosqlite.connect(DB_PATH) as db:
+        if new_status in ("member", "administrator"):
+            await db.execute("INSERT INTO known_groups(chat_id,title,added_at) VALUES(?,?,?) ON CONFLICT(chat_id) DO UPDATE SET title=excluded.title", (chat.id, chat.title or "Группа", now()))
+        elif new_status in ("left", "kicked"):
+            await db.execute("DELETE FROM known_groups WHERE chat_id=?", (chat.id,))
+        await db.commit()
+
+@dp.callback_query(F.data == "my_groups")
+async def my_groups(c: CallbackQuery):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT title,chat_id FROM known_groups ORDER BY title LIMIT 50")
+        rows = await cur.fetchall()
+    if not rows:
+        text = "Пока не вижу групп, где я состою. Добавь меня через кнопку «Добавить в группу» и проверь, что я не удалён из неё."
+    else:
+        text = "👥 <b>Группы, где состоит бот:</b>\n" + "\n".join(f"• {safe(title)} — <code>{gid}</code>" for title,gid in rows)
+    await c.message.answer(text, parse_mode="HTML")
+    await c.answer()
+
+@dp.callback_query(F.data == "show_commands")
+async def show_commands(c: CallbackQuery):
+    await c.message.answer("Открой список команд: /help")
+    await c.answer()
 
 COMMAND_SECTIONS = {
-    "main": ("📌 Основные", "<b>Основные команды</b>\n/start — запуск бота\n/help или /commands — меню команд\n/id — ID пользователя и чата\n/profile — профиль\n/balance — баланс\n/bio ТЕКСТ — описание профиля\n/daily — ежедневный бонус\n/pay СУММА (ответом) — перевести монеты"),
+    "main": ("📌 Основные", "<b>Основные команды</b>\n/start — запуск бота\n/help или /команды — меню команд\n/id — ID пользователя и чата\n/profile — профиль\n/balance — баланс\n/bio ТЕКСТ — описание профиля\n/daily — ежедневный бонус\n/pay СУММА (ответом) — перевести монеты"),
     "moderation": ("🛡 Модерация", "<b>Модерация</b> (в большинстве случаев ответом на сообщение)\n/warn [причина] — предупреждение\n/warnings — активные предупреждения\n/unwarn — снять последнее предупреждение\n/mute 30m причина — мут на 30 минут\n/mute 1h причина — мут на 1 час\n/mute 2d причина — мут на 2 дня\n/unmute — снять мут\n/ban [срок] [причина] — бан навсегда или на срок\nПример: /ban 1d спам\n/unban USER_ID — разбанить по ID\n/softban [причина] — удалить и сразу снять бан\n/kick — исключить без постоянного бана\n/purge ЧИСЛО (ответом) — удалить сообщения\n/modlog — журнал действий\n/setrules ТЕКСТ — установить правила\n/warnlimit ЧИСЛО — лимит предупреждений"),
-    "fun": ("🎭 Развлечения", "<b>Развлечения</b> (ответом на сообщение)\n/обнять — обнять\n/пнуть — шуточный мультяшный пинок\n/датьпять — дать пять\n/погладить — дружеское действие\n/поддержать — поддержать\n/пожатьруку — рукопожатие\n/танцевать — танец\n/флирт — лёгкий подкат\n/ship — совместимость\n/choose ВАРИАНТ1 | ВАРИАНТ2 — выбор\n/random — случайное число\n/roll — кубик\n/joke — шутка\n/compliment — комплимент"),
-    "social": ("💞 Отношения", "<b>Отношения и сообщество</b>\n/marry (ответом) — предложить брак\n/marry_yes — принять предложение\n/marry_no — отклонить\n/my_marriage — посмотреть свой статус\n/divorce — развестись\n/marriages — список браков\n/rep — репутация (ответом)\n/rep_plus — повысить репутацию\n/rep_minus — понизить репутацию\n/clancreate НАЗВАНИЕ — создать клан\n/clans — список кланов\n/clanjoin ID — вступить\n/clanleave — выйти\n/myclan — мой клан"),
-    "tools": ("🧰 Инструменты", "<b>Инструменты чата</b>\n/rules — правила чата\n/setwelcome ТЕКСТ — задать приветствие\n/welcomeon и /welcomeoff — приветствие вкл./выкл.\n/note НАЗВАНИЕ | ТЕКСТ — сохранить заметку (админ)\n/notes — список заметок\n/noteget НАЗВАНИЕ — показать заметку\n/notedel НАЗВАНИЕ — удалить заметку (админ)\n/stats — статистика чата\n/top — топ активности\n/bookmark (ответом) — сохранить сообщение\n/bookmarks — мои закладки\n/bookmarkdel НОМЕР — удалить закладку\n/timer СЕКУНДЫ ТЕКСТ — напоминание")
+    "fun": ("🎭 Развлечения", "<b>Развлечения</b> (ответом на сообщение)\n/обнять — обнять\n/пнуть — шуточный мультяшный пинок\n/датьпять — дать пять\n/погладить — дружеское действие\n/поддержать — поддержать\n/пожатьруку — рукопожатие\n/танцевать — танец\n/флирт — лёгкий подкат\n/шип — совместимость\n/выбери ВАРИАНТ1 | ВАРИАНТ2 — выбор\n/рандом — случайное число\n/кубик — кубик\n/анекдот — шутка\n/комплимент — комплимент"),
+    "social": ("💞 Отношения", "<b>Отношения и сообщество</b>\n/брак (ответом) — предложить брак\n/брак_да — принять предложение\n/брак_нет — отклонить\n/мой_брак — посмотреть свой статус\n/развод — развестись\n/браки — список браков\n/rep — репутация (ответом)\n/реп_плюс — повысить репутацию\n/реп_минус — понизить репутацию\n/клансоздать НАЗВАНИЕ — создать клан\n/кланы — список кланов\n/кланвступить ID — вступить\n/кланвыйти — выйти\n/мойклан — мой клан"),
+    "tools": ("🧰 Инструменты", "<b>Инструменты чата</b>\n/rules — правила чата\n/setwelcome ТЕКСТ — задать приветствие\n/welcomeon и /welcomeoff — приветствие вкл./выкл.\n/note НАЗВАНИЕ | ТЕКСТ — сохранить заметку (админ)\n/заметки — список заметок\n/заметкапоказать НАЗВАНИЕ — показать заметку\n/заметкаудалить НАЗВАНИЕ — удалить заметку (админ)\n/stats — статистика чата\n/top — топ активности\n/bookmark (ответом) — сохранить сообщение\n/bookmarks — мои закладки\n/bookmarkdel НОМЕР — удалить закладку\n/timer СЕКУНДЫ ТЕКСТ — напоминание")
 }
 
 def command_menu():
@@ -192,7 +235,7 @@ def command_menu():
 @dp.message(Command("help", "commands", "команды", "списоккоманд"))
 async def help_cmd(m: Message):
     await m.answer(
-        "<b>📚 MisuGram Iris — список команд</b>\nВыбери раздел ниже. Команды модерации доступны только администраторам группы, если не указано иное.",
+        "<b>📚 DropGram Iris — список команд</b>\nВыбери раздел ниже. Команды модерации доступны только администраторам группы, если не указано иное.",
         reply_markup=command_menu(),
         parse_mode="HTML"
     )
@@ -547,11 +590,11 @@ async def modlog(m):
     out="\n".join(f"{r[2]} | user {r[0]} | mod {r[1]} | {safe(r[3])} | {r[4][:16]}" for r in rows)
     await m.answer("<b>Журнал модерации</b>\n"+out,parse_mode="HTML")
 
-@dp.message(Command("clancreate"))
+@dp.message(Command("клансоздать"))
 async def clancreate(m):
     name=(m.text or "").partition(" ")[2].strip()
     if m.chat.type=="private": return await m.answer("Кланы создаются в группе.")
-    if not name or len(name)>40: return await m.answer("Использование: /clancreate Название (до 40 символов)")
+    if not name or len(name)>40: return await m.answer("Использование: /клансоздать Название (до 40 символов)")
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("INSERT INTO clans(chat_id,owner_id,name) VALUES(?,?,?)",(m.chat.id,m.from_user.id,name))
@@ -560,21 +603,21 @@ async def clancreate(m):
             clan_id=(await cur.fetchone())[0]
             await db.execute("INSERT OR REPLACE INTO clan_members(chat_id,user_id,clan_id) VALUES(?,?,?)",(m.chat.id,m.from_user.id,clan_id))
             await db.commit()
-        await m.answer(f"🏰 Клан «{safe(name)}» создан. ID клана: {clan_id}. Вступить: /clanjoin {clan_id}",parse_mode="HTML")
+        await m.answer(f"🏰 Клан «{safe(name)}» создан. ID клана: {clan_id}. Вступить: /кланвступить {clan_id}",parse_mode="HTML")
     except aiosqlite.IntegrityError:
         await m.answer("Клан с таким названием уже существует в этой группе.")
 
-@dp.message(Command("clans"))
+@dp.message(Command("кланы"))
 async def clans(m):
     async with aiosqlite.connect(DB_PATH) as db:
         cur=await db.execute("SELECT id,name,owner_id FROM clans WHERE chat_id=? ORDER BY id DESC LIMIT 30",(m.chat.id,))
         rows=await cur.fetchall()
     await m.answer("🏰 <b>Кланы</b>\n"+("\n".join(f"#{r[0]} — {safe(r[1])} (владелец ID {r[2]})" for r in rows) if rows else "Пока нет кланов."),parse_mode="HTML")
 
-@dp.message(Command("clanjoin"))
+@dp.message(Command("кланвступить"))
 async def clanjoin(m):
     parts=(m.text or "").split()
-    if len(parts)!=2 or not parts[1].isdigit(): return await m.answer("Использование: /clanjoin ID")
+    if len(parts)!=2 or not parts[1].isdigit(): return await m.answer("Использование: /кланвступить ID")
     async with aiosqlite.connect(DB_PATH) as db:
         cur=await db.execute("SELECT id FROM clans WHERE id=? AND chat_id=?",(int(parts[1]),m.chat.id))
         row=await cur.fetchone()
@@ -583,13 +626,13 @@ async def clanjoin(m):
         await db.commit()
     await m.answer("✅ Ты вступил в клан.")
 
-@dp.message(Command("clanleave"))
+@dp.message(Command("кланвыйти"))
 async def clanleave(m):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM clan_members WHERE chat_id=? AND user_id=?",(m.chat.id,m.from_user.id)); await db.commit()
     await m.answer("Ты вышел из клана.")
 
-@dp.message(Command("myclan"))
+@dp.message(Command("мойклан"))
 async def myclan(m):
     async with aiosqlite.connect(DB_PATH) as db:
         cur=await db.execute("SELECT c.id,c.name,c.owner_id,c.description FROM clans c JOIN clan_members cm ON cm.clan_id=c.id WHERE cm.chat_id=? AND cm.user_id=?",(m.chat.id,m.from_user.id))
@@ -621,10 +664,10 @@ async def marry(m):
     async with aiosqlite.connect(DB_PATH) as db:
         cur=await db.execute("SELECT id FROM marriages WHERE chat_id=? AND user1=? AND user2=? AND status='pending'",(m.chat.id,a.id,b.id))
         if await cur.fetchone():
-            return await m.answer("Предложение уже отправлено. Получатель может ответить /marry_yes или /marry_no.")
+            return await m.answer("Предложение уже отправлено. Получатель может ответить /брак_да или /брак_нет.")
         await db.execute("INSERT INTO marriages(chat_id,user1,user2,status,created_at) VALUES(?,?,?,'pending',?)",(m.chat.id,a.id,b.id,now()))
         await db.commit()
-    await m.answer(f"💍 {mention(a)} предлагает брак {mention(b)}!\nПолучатель может ответить командой /marry_yes или /marry_no.",parse_mode="HTML")
+    await m.answer(f"💍 {mention(a)} предлагает брак {mention(b)}!\nПолучатель может ответить командой /брак_да или /брак_нет.",parse_mode="HTML")
 
 @dp.message(Command("marry_yes"))
 async def marry_yes(m):
@@ -638,7 +681,7 @@ async def marry_yes(m):
             return await m.answer("Предложение отменено: один из пользователей уже состоит в браке.")
         await db.execute("UPDATE marriages SET status='active' WHERE id=?",(row[0],))
         await db.commit()
-    await m.answer("💍 Поздравляем! Брак заключён. Используй /my_marriage для просмотра.")
+    await m.answer("💍 Поздравляем! Брак заключён. Используй /мой_брак для просмотра.")
 
 @dp.message(Command("marry_no"))
 async def marry_no(m):
@@ -688,23 +731,23 @@ COMPLIMENTS = [
     "Не забывай: даже маленький шаг — это прогресс 💪"
 ]
 
-@dp.message(Command("joke", "анекдот"))
+@dp.message(Command("анекдот"))
 async def joke(m):
     await m.answer(random.choice(JOKES))
 
-@dp.message(Command("compliment", "комплимент"))
+@dp.message(Command("комплимент"))
 async def compliment(m):
     target=m.reply_to_message.from_user if m.reply_to_message and m.reply_to_message.from_user else m.from_user
     await m.answer(f"🌟 {mention(target)}, {random.choice(COMPLIMENTS)}",parse_mode="HTML")
 
-@dp.message(Command("choose", "выбери"))
+@dp.message(Command("выбери"))
 async def choose(m):
     raw=(m.text or "").partition(" ")[2]
     options=[x.strip() for x in raw.split("|") if x.strip()]
-    if len(options)<2: return await m.answer("Пример: /choose пицца | суши | паста")
+    if len(options)<2: return await m.answer("Пример: /выбери пицца | суши | паста")
     await m.answer("🎯 Мой выбор: "+random.choice(options))
 
-@dp.message(Command("random", "рандом"))
+@dp.message(Command("рандом"))
 async def random_number(m):
     parts=(m.text or "").split()
     try:
@@ -713,13 +756,13 @@ async def random_number(m):
         if hi-lo>10**9: return await m.answer("Слишком большой диапазон.")
         await m.answer(f"🎲 Случайное число: {random.randint(lo,hi)}")
     except ValueError:
-        await m.answer("Формат: /random 1 100")
+        await m.answer("Формат: /рандом 1 100")
 
-@dp.message(Command("roll", "кубик"))
+@dp.message(Command("кубик"))
 async def roll(m):
     await m.answer(f"🎲 Выпало: {random.randint(1,6)}")
 
-@dp.message(Command("ship", "шип"))
+@dp.message(Command("шип"))
 async def ship(m):
     if m.reply_to_message and m.reply_to_message.from_user:
         a,b=m.from_user,m.reply_to_message.from_user
@@ -727,7 +770,7 @@ async def ship(m):
         pct=random.randint(0,100)
         await m.answer(f"💞 Совместимость {mention(a)} и {mention(b)}: {pct}% — это просто случайная игра!",parse_mode="HTML")
     else:
-        await m.answer("Ответь на сообщение пользователя командой /ship.")
+        await m.answer("Ответь на сообщение пользователя командой /шип.")
 
 
 # Короткие мемные RP-команды. Все ответы шуточные и без подробного насилия.
@@ -786,7 +829,7 @@ async def rp_flirt(m):
     ]
     await m.answer(f"😉 {mention(m.from_user)} {random.choice(lines)} для {mention(target)}", parse_mode="HTML")
 
-@dp.message(Command("rep", "репутация"))
+@dp.message(Command("репутация"))
 async def rep(m):
     target=m.reply_to_message.from_user if m.reply_to_message and m.reply_to_message.from_user else m.from_user
     async with aiosqlite.connect(DB_PATH) as db:
@@ -813,7 +856,7 @@ async def rep_plus(m): await rep_change(m,1)
 async def rep_minus(m): await rep_change(m,-1)
 
 # ── Chat notes ───────────────────────────────────────────────────────────────
-@dp.message(Command("note"))
+@dp.message(Command("заметка"))
 async def note(m):
     if not await admin(m): return await m.answer("Заметки может создавать администратор группы.")
     raw=(m.text or "").partition(" ")[2]
@@ -825,33 +868,48 @@ async def note(m):
         await db.commit()
     await m.answer(f"📝 Заметка «{safe(name)}» сохранена.",parse_mode="HTML")
 
-@dp.message(Command("notes"))
+@dp.message(Command("заметки"))
 async def notes(m):
     async with aiosqlite.connect(DB_PATH) as db:
         cur=await db.execute("SELECT name FROM notes WHERE chat_id=? ORDER BY name LIMIT 50",(m.chat.id,))
         rows=await cur.fetchall()
     await m.answer("📝 Заметки:\n"+("\n".join("• "+safe(r[0]) for r in rows) if rows else "Пока нет заметок."),parse_mode="HTML")
 
-@dp.message(Command("noteget"))
+@dp.message(Command("заметкапоказать"))
 async def noteget(m):
     name=(m.text or "").partition(" ")[2].strip().lower()
-    if not name: return await m.answer("Формат: /noteget название")
+    if not name: return await m.answer("Формат: /заметкапоказать название")
     async with aiosqlite.connect(DB_PATH) as db:
         cur=await db.execute("SELECT body FROM notes WHERE chat_id=? AND name=?",(m.chat.id,name))
         row=await cur.fetchone()
     await m.answer(row[0] if row else "Заметка не найдена.")
 
-@dp.message(Command("notedel"))
+@dp.message(Command("заметкаудалить"))
 async def notedel(m):
     if not await admin(m): return await m.answer("Удалять заметки может администратор.")
     name=(m.text or "").partition(" ")[2].strip().lower()
-    if not name: return await m.answer("Формат: /notedel название")
+    if not name: return await m.answer("Формат: /заметкаудалить название")
     async with aiosqlite.connect(DB_PATH) as db:
         cur=await db.execute("DELETE FROM notes WHERE chat_id=? AND name=?",(m.chat.id,name))
         await db.commit()
     await m.answer("🗑 Заметка удалена." if cur.rowcount else "Заметка не найдена.")
 
 
+
+@dp.message(Command("смс"))
+async def delete_replied_message(m: Message):
+    if m.chat.type == "private":
+        return await m.answer("Команда /смс работает в группе: ответь на сообщение и отправь /смс.")
+    if not m.reply_to_message:
+        return await m.answer("Ответь на сообщение, которое нужно удалить, командой /смс.")
+    if not await admin(m):
+        return await m.answer("Удалять чужие сообщения командой /смс может только администратор группы.")
+    try:
+        await m.bot.delete_message(m.chat.id, m.reply_to_message.message_id)
+        await m.bot.delete_message(m.chat.id, m.message_id)
+    except TelegramAPIError as e:
+        log.warning("Не удалось удалить сообщение: %s", e)
+        await m.answer("Не получилось удалить сообщение. Проверь, что у бота есть право удалять сообщения и что сообщение не слишком старое.")
 
 # ── Статистика чата ──────────────────────────────────────────────────────────
 @dp.message(F.text & ~F.text.startswith("/"))

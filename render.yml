@@ -1,6 +1,6 @@
 services:
   - type: worker
-    name: misugram-iris-bot
+    name: dropgram-iris-bot
     runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
@@ -10,10 +10,10 @@ services:
       - key: API_URL
         value: http://67.211.221.152:8888
       - key: DB_PATH
-        value: /var/data/misugram.sqlite3
+        value: /var/data/dropgram.sqlite3
       - key: START_BALANCE
         value: "100"
     disk:
-      name: misugram-iris-data
+      name: dropgram-iris-data
       mountPath: /var/data
       sizeGB: 1

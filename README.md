@@ -1,4 +1,4 @@
-# MisuGram Iris Bot v3 — expanded modules
+# DropGram Iris Bot v3 — expanded modules
 
 Python 3.11+, aiogram 3.x, SQLite, polling, custom Bot API server.
 
@@ -42,4 +42,4 @@ The API server must support the Bot API methods used; otherwise affected actions
 - Временный или постоянный бан: `/ban 1d причина` или `/ban причина` (навсегда).
 - `/softban причина` — удалить участника баном с немедленным разбаном.
 - `/unban USER_ID` и `/unmute` снимают соответствующие ограничения.
-- Бот должен быть администратором группы с правами блокировать участников и ограничивать участников. Совместимость конкретного MisuGram Bot API зависит от поддерживаемых методов.
+- Бот должен быть администратором группы с правами блокировать участников и ограничивать участников. Совместимость конкретного DropGram Bot API зависит от поддерживаемых методов.
