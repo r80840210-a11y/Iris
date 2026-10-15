@@ -371,7 +371,14 @@ async def debug_cmd(m):
     if not r:
         return await m.answer("Ответь командой /debug на нужное сообщение.")
     raw = r.model_dump_json(exclude_none=True, indent=1) if hasattr(r, "model_dump_json") else str(r)
-    await m.answer(f"<pre>{safe(raw[:3500])}</pre>", parse_mode="HTML")
+    cached = await author_from_cache(m.chat.id, r.message_id)
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT COUNT(*), MAX(message_id) FROM message_authors WHERE chat_id=?", (m.chat.id,))
+        cnt, mx = await cur.fetchone()
+    info = (f"\nАвтор в кэше: {cached.id if cached else 'НЕТ'}"
+            f"\nСообщений в кэше этого чата: {cnt}, последний message_id: {mx}"
+            f"\nmessage_id этой команды: {m.message_id}\nБаза: {DB_PATH}")
+    await m.answer(f"<pre>{safe(raw[:2500])}</pre>{safe(info)}", parse_mode="HTML")
 
 @dp.message(Command("id"))
 async def id_cmd(m):
