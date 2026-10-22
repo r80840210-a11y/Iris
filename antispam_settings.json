@@ -1,0 +1,36 @@
+{
+  "-1002391432309": {
+    "anti_flood": false,
+    "block_sensitive": false,
+    "block_links": false,
+    "block_channel_mask": true,
+    "block_channel_forward": true,
+    "block_user_forward": true,
+    "block_group_mention": false,
+    "block_user_mention": false,
+    "block_eth_address": false,
+    "clear_command_msg": false,
+    "block_long_msg": false,
+    "block_long_name": false,
+    "ban_time": 60,
+    "delete_notice_time": 5,
+    "punishment_type": "mute"
+  },
+  "-1002061288009": {
+    "anti_flood": false,
+    "block_sensitive": false,
+    "block_links": false,
+    "block_channel_mask": true,
+    "block_channel_forward": true,
+    "block_user_forward": true,
+    "block_group_mention": false,
+    "block_user_mention": false,
+    "block_eth_address": false,
+    "clear_command_msg": false,
+    "block_long_msg": false,
+    "block_long_name": false,
+    "ban_time": 60,
+    "delete_notice_time": 5,
+    "punishment_type": "mute"
+  }
+}
